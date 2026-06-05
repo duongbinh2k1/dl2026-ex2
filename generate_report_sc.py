@@ -286,7 +286,7 @@ add_table(doc,
         ['Super Convergence', '1-Cycle LR',       f'{oc_acc*100:.2f}%', f'+{gain:.2f} pp'],
     ],
     "Table 2. Final test accuracy on CIFAR-10 after 30 epochs. "
-    "The 1-Cycle policy outperforms cosine annealing by +1.09 pp."
+    f"The 1-Cycle policy outperforms cosine annealing by {gain:+.2f} pp."
 )
 add_figure(doc,
     os.path.join(OUT_DIR, 'sc_accuracy_comparison.png'),
