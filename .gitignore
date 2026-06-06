@@ -1,0 +1,30 @@
+# Dataset & model weights
+data/
+*.pt
+*.pth
+
+# Experiment results (generated at runtime)
+results_tl.json
+results_sc.json
+results.json
+
+# Old/intermediate result files
+results_student*/
+*.json.bak
+
+# Assignment PDFs
+compressed_DL.pdf
+ex2_Training.pdf
+
+# Generated figures (overwritten each run)
+tl_*.png
+sc_*.png
+fig_*.png
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
