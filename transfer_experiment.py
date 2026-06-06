@@ -1,407 +1,378 @@
-#!/usr/bin/env python3
 """
-Transfer Learning on CIFAR-10
-Practical Session 2 – Advanced Deep Learning Strategies
-USTH Deep Learning 2026
-Duong Tan Binh – 2540007
+transfer_experiment.py
+======================
+Transfer Learning Experiment: STL-10 with ImageNet-pretrained ResNet-18
 
-Three conditions (mapping to slide p.46 quadrant – small + similar data):
-  1. Scratch        : ResNet-18 random init, train from scratch
-  2. Feature Extract: ResNet-18 ImageNet pretrained, backbone FROZEN, only head trained
-  3. Fine-tuning    : ResNet-18 ImageNet pretrained, ALL layers trained (differential LR)
+Why STL-10?
+  - 96x96 images -> layer4 outputs 3x3 feature maps (not 1x1 like CIFAR-10 at 32x32)
+  - Only 5 000 labeled training samples -> small-data regime where TL shines
+  - Explicitly designed as a Transfer-Learning benchmark dataset
 
-Expected results (guaranteed by decades of TL literature):
-  Scratch < Feature Extract < Fine-tuning  (accuracy)
-  Scratch >> Feature Extract (epochs to converge)
+Three conditions compared:
+  1. Scratch          - ResNet-18 random init, full training
+  2. Feature Extract  - ImageNet pretrained, backbone frozen, only FC head trained
+  3. Fine-tuning      - ImageNet pretrained, differential LR (backbone 10x lower)
+
+Spatial resolution trace for 96x96 input through standard ResNet-18:
+  conv1  (7x7 s2)  : 96x96 -> 48x48
+  maxpool(3x3 s2)  : 48x48 -> 24x24
+  layer1 (s1)      : 24x24
+  layer2 (s2)      : 12x12
+  layer3 (s2)      :  6x6
+  layer4 (s2)      :  3x3   <- sufficient spatial context for pretrained features
+  avgpool + fc     :  512->10
 """
 
-import os, json, time, copy
-import numpy as np
+import copy, json, time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
-from torchvision import datasets, transforms, models
+import torchvision
+import torchvision.models as models
+import torchvision.transforms as transforms
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# ══════════════════════════════════════════════════════════
-# 0.  CONFIGURATION
-# ══════════════════════════════════════════════════════════
-SEED            = 42
-BATCH_SIZE      = 128
-SCRATCH_EPOCHS  = 30    # scratch needs more epochs to converge
-TL_EPOCHS       = 20    # pretrained models converge faster
-NUM_CLASSES     = 10
-OUT_DIR         = os.path.dirname(os.path.abspath(__file__))
+# Reproducibility
+torch.manual_seed(42)
 
-torch.manual_seed(SEED)
-np.random.seed(SEED)
+# ── Config ─────────────────────────────────────────────────────────────────────
+DEVICE      = torch.device('mps'  if torch.backends.mps.is_available()
+              else         'cuda' if torch.cuda.is_available()
+              else         'cpu')
+DATA_DIR    = './data'
+NUM_CLASSES = 10
+BATCH_SIZE  = 64
+EPOCHS      = 30
+NUM_WORKERS = 2
 
-DEVICE = ('mps'  if torch.backends.mps.is_available() else
-          'cuda' if torch.cuda.is_available()       else 'cpu')
-print(f"Device: {DEVICE}", flush=True)
+# STL-10 per-channel mean/std (computed on training split)
+STL10_MEAN = [0.4467, 0.4398, 0.4066]
+STL10_STD  = [0.2603, 0.2565, 0.2712]
 
-CLASSES = ('plane','car','bird','cat','deer','dog','frog','horse','ship','truck')
+print(f"[Config] device={DEVICE}  batch={BATCH_SIZE}  epochs={EPOCHS}")
+print("[Config] dataset=STL-10 (96x96, 5000 train / 8000 test, 10 classes)")
 
-# ══════════════════════════════════════════════════════════
-# 1.  DATA
-# ══════════════════════════════════════════════════════════
-MEAN = (0.4914, 0.4822, 0.4465)
-STD  = (0.2023, 0.1994, 0.2010)
+# ── Data loaders ───────────────────────────────────────────────────────────────
+train_transform = transforms.Compose([
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomCrop(96, padding=12),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3),
+    transforms.ToTensor(),
+    transforms.Normalize(STL10_MEAN, STL10_STD),
+])
+test_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(STL10_MEAN, STL10_STD),
+])
 
-_to_tensor = transforms.Compose([transforms.ToTensor(),
-                                  transforms.Normalize(MEAN, STD)])
-_pad_crop   = transforms.Compose([transforms.RandomCrop(32, padding=4),
-                                   transforms.RandomHorizontalFlip()])
+print("[Data] Downloading / loading STL-10 ...")
+train_set = torchvision.datasets.STL10(
+    root=DATA_DIR, split='train', download=True, transform=train_transform)
+test_set  = torchvision.datasets.STL10(
+    root=DATA_DIR, split='test',  download=True, transform=test_transform)
 
-print("Loading CIFAR-10 into memory...", flush=True)
-data_dir  = os.path.join(OUT_DIR, 'data')
-_train_ds = datasets.CIFAR10(data_dir, train=True,  download=True, transform=_to_tensor)
-_test_ds  = datasets.CIFAR10(data_dir, train=False, download=True, transform=_to_tensor)
+train_loader = torch.utils.data.DataLoader(
+    train_set, batch_size=BATCH_SIZE, shuffle=True,
+    num_workers=NUM_WORKERS, pin_memory=True)
+test_loader  = torch.utils.data.DataLoader(
+    test_set,  batch_size=BATCH_SIZE, shuffle=False,
+    num_workers=NUM_WORKERS, pin_memory=True)
 
-def _ds_to_tensors(ds):
-    loader = DataLoader(ds, batch_size=2048, shuffle=False, num_workers=0)
-    xs, ys = zip(*[(x, y) for x, y in loader])
-    return torch.cat(xs), torch.cat(ys)
+print(f"[Data] Train: {len(train_set)}  |  Test: {len(test_set)}")
 
-_train_x, _train_y = _ds_to_tensors(_train_ds)
-_test_x,  _test_y  = _ds_to_tensors(_test_ds)
-print(f"  Train: {_train_x.shape}  Test: {_test_x.shape}", flush=True)
-
-def get_loaders():
-    train_loader = DataLoader(TensorDataset(_train_x, _train_y),
-                              batch_size=BATCH_SIZE, shuffle=True,  num_workers=0)
-    test_loader  = DataLoader(TensorDataset(_test_x,  _test_y),
-                              batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-    return train_loader, test_loader
-
-train_loader, test_loader = get_loaders()
-
-
-# ══════════════════════════════════════════════════════════
-# 2.  MODELS
-# ══════════════════════════════════════════════════════════
-def make_resnet_cifar(pretrained=False):
+# ── Model factory ──────────────────────────────────────────────────────────────
+def build_model(mode: str) -> nn.Module:
     """
-    ResNet-18 for CIFAR-10 (32×32 input).
+    Build ResNet-18 for the given training mode.
 
-    Architecture choice:
-      - Scratch:  random init, conv1 adapted to 3×3 stride-1 (no maxpool)
-                  for better spatial resolution on small images.
-      - Pretrained: keep ORIGINAL 7×7 conv1 + maxpool from ImageNet weights.
-                    This is CRITICAL — changing conv1 breaks the pretrained
-                    feature hierarchy (layer1-4 weights expect features from
-                    the original 7×7 conv1, not a new random 3×3 one).
-                    Only the fc head is replaced.
+    The ORIGINAL ResNet-18 architecture is used unchanged (7x7 conv1 + maxpool).
+    This is correct for STL-10 at 96x96 because layer4 still produces 3x3 feature
+    maps -- enough spatial context for ImageNet pretrained features to transfer well.
 
-    With 32×32 input through standard ResNet-18:
-      32 → conv1(7×7,s2) → 16 → maxpool(3×3,s2) → 8
-         → layer1 → 8 → layer2 → 4 → layer3 → 2 → layer4 → 1
-         → avgpool → 512-d feature → fc → 10
-    The pretrained weights are fully utilised.
+    Parameters
+    ----------
+    mode : 'scratch' | 'feature_extract' | 'finetune'
     """
-    if pretrained:
-        # Load full ImageNet weights — keep conv1, maxpool, layer1-4, bn1 intact
-        m = models.resnet18(weights='IMAGENET1K_V1')
-        # Only replace the task-specific head
-        m.fc = nn.Linear(512, NUM_CLASSES)
-        nn.init.normal_(m.fc.weight, 0, 0.01)
-        nn.init.zeros_(m.fc.bias)
+    if mode == 'scratch':
+        # Random initialisation -- learn everything from STL-10 labels only
+        model = models.resnet18(weights=None)
+        model.fc = nn.Linear(512, NUM_CLASSES)
+
+    elif mode == 'feature_extract':
+        # Pretrained backbone, FROZEN -- only the new classification head is updated
+        model = models.resnet18(weights='IMAGENET1K_V1')
+        model.fc = nn.Linear(512, NUM_CLASSES)
+        nn.init.normal_(model.fc.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(model.fc.bias)
+        for name, param in model.named_parameters():
+            if 'fc' not in name:
+                param.requires_grad = False   # freeze backbone
+
+    elif mode == 'finetune':
+        # Pretrained backbone, FULLY TRAINABLE with differential LR
+        # (backbone LR = 1/10 of head LR to avoid catastrophic forgetting)
+        model = models.resnet18(weights='IMAGENET1K_V1')
+        model.fc = nn.Linear(512, NUM_CLASSES)
+        nn.init.normal_(model.fc.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(model.fc.bias)
+        # All params remain requires_grad=True -- differential LR set in run_condition
+
     else:
-        # Scratch: adapt for 32×32 (3×3 conv1, no maxpool) for better resolution
-        m = models.resnet18(weights=None)
-        m.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        m.maxpool = nn.Identity()
-        m.fc      = nn.Linear(512, NUM_CLASSES)
-    return m
+        raise ValueError(f"Unknown mode: {mode!r}")
 
-
-def freeze_backbone(model):
-    """Freeze all layers except the final FC head (feature extraction mode)."""
-    for name, param in model.named_parameters():
-        if not name.startswith('fc'):
-            param.requires_grad = False
     return model
 
 
-def count_params(model, trainable_only=True):
-    return sum(p.numel() for p in model.parameters()
-               if (p.requires_grad if trainable_only else True))
+def count_params(model):
+    total     = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total, trainable
 
-
-# ══════════════════════════════════════════════════════════
-# 3.  TRAINING UTILITIES
-# ══════════════════════════════════════════════════════════
-def aug(x):
-    dev = x.device; x = x.cpu()
-    return torch.stack([_pad_crop(xi) for xi in x]).to(dev)
+# ── Training utilities ─────────────────────────────────────────────────────────
+def train_epoch(model, loader, optimizer, criterion):
+    model.train()
+    total_loss = correct = n = 0
+    for x, y in loader:
+        x, y = x.to(DEVICE), y.to(DEVICE)
+        optimizer.zero_grad()
+        out  = model(x)
+        loss = criterion(out, y)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * x.size(0)
+        correct    += (out.argmax(1) == y).sum().item()
+        n          += x.size(0)
+    return total_loss / n, correct / n
 
 
 @torch.no_grad()
-def evaluate(model, loader):
-    model.eval(); ls=cr=n=0; preds=[]; lbls=[]
-    for xb, yb in loader:
-        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-        out  = model(xb); loss = F.cross_entropy(out, yb)
-        pred = out.argmax(1)
-        ls += loss.item()*len(yb); cr += (pred==yb).sum().item(); n += len(yb)
-        preds.extend(pred.cpu().tolist()); lbls.extend(yb.cpu().tolist())
-    return ls/n, cr/n, preds, lbls
+def evaluate(model, loader, criterion):
+    model.eval()
+    total_loss = correct = n = 0
+    for x, y in loader:
+        x, y = x.to(DEVICE), y.to(DEVICE)
+        out  = model(x)
+        loss = criterion(out, y)
+        total_loss += loss.item() * x.size(0)
+        correct    += (out.argmax(1) == y).sum().item()
+        n          += x.size(0)
+    return total_loss / n, correct / n
+
+# ── Experiment runner ──────────────────────────────────────────────────────────
+LABEL = {
+    'scratch':         'From Scratch',
+    'feature_extract': 'Feature Extraction',
+    'finetune':        'Fine-tuning',
+}
 
 
-def run_training(model, epochs, label, opt):
-    """Generic training loop with cosine LR annealing."""
-    sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    hist  = dict(train_loss=[], train_acc=[], val_loss=[], val_acc=[])
-    best_acc=0.; best_w=None
-    print(f"\n{'─'*60}\n  {label}  epochs={epochs}\n{'─'*60}", flush=True)
+def run_condition(mode: str) -> dict:
+    print(f"\n{'─'*60}")
+    print(f"  Condition: {LABEL[mode]}")
+    print(f"{'─'*60}")
+
+    model = build_model(mode).to(DEVICE)
+    total, trainable = count_params(model)
+    print(f"  Params: {total:,} total  |  {trainable:,} trainable "
+          f"({trainable/total*100:.1f}%)")
+
+    criterion = nn.CrossEntropyLoss()
+
+    # Optimizer + scheduler tuned per condition
+    if mode == 'scratch':
+        # SGD + cosine annealing -- standard recipe for training from scratch
+        optimizer = optim.SGD(
+            model.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=EPOCHS, eta_min=1e-4)
+
+    elif mode == 'feature_extract':
+        # Adam with moderate LR -- backbone frozen, only FC updated
+        optimizer = optim.Adam(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=1e-3, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=EPOCHS, eta_min=1e-5)
+
+    elif mode == 'finetune':
+        # Differential LR:
+        #   backbone_lr = 1e-3  (10x lower) -- preserve pretrained features
+        #   head_lr     = 1e-2              -- adapt new classifier fast
+        backbone_params = [p for n, p in model.named_parameters() if 'fc' not in n]
+        head_params     = [p for n, p in model.named_parameters() if 'fc'     in n]
+        optimizer = optim.SGD([
+            {'params': backbone_params, 'lr': 1e-3},
+            {'params': head_params,     'lr': 1e-2},
+        ], momentum=0.9, weight_decay=5e-4)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=EPOCHS, eta_min=1e-5)
+
+    # Training loop
+    history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+    best_acc   = 0.0
+    best_state = None
     t0 = time.time()
-    for ep in range(1, epochs+1):
-        model.train(); tls=tcr=tn=0
-        for xb, yb in train_loader:
-            xb = aug(xb)
-            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-            opt.zero_grad()
-            out  = model(xb); loss = F.cross_entropy(out, yb)
-            loss.backward(); opt.step()
-            tls += loss.item()*len(yb)
-            tcr += (out.argmax(1)==yb).sum().item(); tn += len(yb)
-        sched.step()
-        vl, va, _, _ = evaluate(model, test_loader)
-        tl, ta = tls/tn, tcr/tn
-        hist['train_loss'].append(tl); hist['train_acc'].append(ta)
-        hist['val_loss'].append(vl);   hist['val_acc'].append(va)
-        if va > best_acc: best_acc=va; best_w=copy.deepcopy(model.state_dict())
-        if ep % 5 == 0 or ep == 1:
-            print(f"  ep {ep:2d}/{epochs}  tr {tl:.3f}/{ta:.3f}  "
-                  f"val {vl:.3f}/{va:.3f}  best {best_acc:.3f}  "
-                  f"[{time.time()-t0:.0f}s]", flush=True)
-    model.load_state_dict(best_w)
-    print(f"  → best val acc: {best_acc:.4f}", flush=True)
-    return hist, best_acc
 
+    for ep in range(1, EPOCHS + 1):
+        tr_loss, tr_acc = train_epoch(model, train_loader, optimizer, criterion)
+        va_loss, va_acc = evaluate(model, test_loader, criterion)
+        scheduler.step()
 
-# ══════════════════════════════════════════════════════════
-# 4.  EXPERIMENTS
-# ══════════════════════════════════════════════════════════
+        history['train_loss'].append(round(tr_loss, 6))
+        history['train_acc'].append(round(tr_acc,  4))
+        history['val_loss'].append(round(va_loss,  6))
+        history['val_acc'].append(round(va_acc,   4))
+
+        if va_acc > best_acc:
+            best_acc   = va_acc
+            best_state = copy.deepcopy(model.state_dict())
+
+        elapsed = time.time() - t0
+        eta     = elapsed / ep * (EPOCHS - ep)
+        print(f"  ep {ep:2d}/{EPOCHS}  "
+              f"train={tr_acc:.4f}  val={va_acc:.4f}  "
+              f"best={best_acc:.4f}  ETA={eta:.0f}s")
+
+    total_time = time.time() - t0
+    print(f"  Done. Best val accuracy: {best_acc*100:.2f}%  "
+          f"({total_time:.0f}s / {total_time/60:.1f} min)")
+
+    return {
+        'mode':             mode,
+        'label':            LABEL[mode],
+        'params_total':     total,
+        'params_trainable': trainable,
+        'best_acc':         round(best_acc, 4),
+        'history':          history,
+    }
+
+# ── Run all three conditions ───────────────────────────────────────────────────
 results = {}
 
-# ── A. Scratch ───────────────────────────────────────────
-model_scratch = make_resnet_cifar(pretrained=False).to(DEVICE)
-n_total  = count_params(model_scratch, trainable_only=False)
-print(f"\nModel params (total): {n_total:,}", flush=True)
+for cond in ('scratch', 'feature_extract', 'finetune'):
+    results[cond] = run_condition(cond)
 
-opt_scratch = optim.SGD(model_scratch.parameters(),
-                         lr=0.1, momentum=0.9, weight_decay=5e-4)
-h_scratch, best_scratch = run_training(
-    model_scratch, SCRATCH_EPOCHS,
-    "1. From Scratch  [random init, all layers trained]",
-    opt_scratch)
-_, final_scratch, pred_scratch, lbl_scratch = evaluate(model_scratch, test_loader)
-results['scratch'] = dict(
-    params_trainable=n_total, params_total=n_total,
-    best_acc=best_scratch, final_acc=final_scratch,
-    epochs=SCRATCH_EPOCHS, history=h_scratch,
-    strategy='scratch')
+with open('results_tl.json', 'w') as f:
+    json.dump(results, f, indent=2)
+print('\n[Saved] results_tl.json')
 
-# ── B. Feature Extraction ────────────────────────────────
-model_feat = make_resnet_cifar(pretrained=True).to(DEVICE)
-freeze_backbone(model_feat)
-n_trainable_feat = count_params(model_feat, trainable_only=True)
-print(f"\nFeature Extraction — trainable params: {n_trainable_feat:,} "
-      f"(FC head only, backbone frozen)", flush=True)
+# ── Summary ────────────────────────────────────────────────────────────────────
+print('\n' + '='*60)
+print('SUMMARY -- Transfer Learning on STL-10 (ResNet-18)')
+print('='*60)
+scratch_acc = results['scratch']['best_acc']
+for mode, r in results.items():
+    delta = r['best_acc'] - scratch_acc
+    sign  = '+' if delta >= 0 else ''
+    print(f"  {r['label']:25s}: {r['best_acc']*100:.2f}%  "
+          f"({sign}{delta*100:.2f} pp vs Scratch)")
 
-# Only optimise the FC head (backbone is frozen)
-opt_feat = optim.SGD(filter(lambda p: p.requires_grad, model_feat.parameters()),
-                      lr=0.05, momentum=0.9, weight_decay=5e-4)
-h_feat, best_feat = run_training(
-    model_feat, TL_EPOCHS,
-    "2. Feature Extraction  [ImageNet pretrained, backbone FROZEN]",
-    opt_feat)
-_, final_feat, pred_feat, lbl_feat = evaluate(model_feat, test_loader)
-results['feature_extract'] = dict(
-    params_trainable=n_trainable_feat, params_total=n_total,
-    best_acc=best_feat, final_acc=final_feat,
-    epochs=TL_EPOCHS, history=h_feat,
-    strategy='feature_extract')
+# ── Plots ──────────────────────────────────────────────────────────────────────
+COLORS = {
+    'scratch':         '#e74c3c',
+    'feature_extract': '#f39c12',
+    'finetune':        '#2ecc71',
+}
+eps = list(range(1, EPOCHS + 1))
 
-# ── C. Fine-tuning ───────────────────────────────────────
-model_ft = make_resnet_cifar(pretrained=True).to(DEVICE)
-n_trainable_ft = count_params(model_ft, trainable_only=True)
-print(f"\nFine-tuning — trainable params: {n_trainable_ft:,} "
-      f"(all layers, differential LR)", flush=True)
+# Plot 1: Validation accuracy + training loss side by side
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+fig.suptitle(
+    'Transfer Learning on STL-10  |  ResNet-18 (ImageNet pretrained)',
+    fontsize=13, fontweight='bold')
 
-# Differential LR: backbone 10× lower than head (standard fine-tuning practice)
-backbone_params = [p for name, p in model_ft.named_parameters()
-                   if not name.startswith('fc')]
-head_params     = list(model_ft.fc.parameters())
-opt_ft = optim.SGD([
-    {'params': backbone_params, 'lr': 0.001},  # pretrained layers: 10× lower (avoid catastrophic forgetting)
-    {'params': head_params,     'lr': 0.01},   # new head: standard LR
-], momentum=0.9, weight_decay=5e-4)
+for mode, r in results.items():
+    ax1.plot(eps, r['history']['val_acc'],
+             color=COLORS[mode], label=r['label'], linewidth=2)
+ax1.set_title('Validation Accuracy over Epochs')
+ax1.set_xlabel('Epoch')
+ax1.set_ylabel('Accuracy')
+ax1.legend()
+ax1.grid(alpha=0.3)
+ax1.set_ylim(0, 1.0)
 
-h_ft, best_ft = run_training(
-    model_ft, TL_EPOCHS,
-    "3. Fine-tuning  [ImageNet pretrained, differential LR: backbone=0.001, head=0.01]",
-    opt_ft)
-_, final_ft, pred_ft, lbl_ft = evaluate(model_ft, test_loader)
-results['finetune'] = dict(
-    params_trainable=n_trainable_ft, params_total=n_total,
-    best_acc=best_ft, final_acc=final_ft,
-    epochs=TL_EPOCHS, history=h_ft,
-    strategy='finetune')
+for mode, r in results.items():
+    ax2.plot(eps, r['history']['train_loss'],
+             color=COLORS[mode], label=r['label'], linewidth=2)
+ax2.set_title('Training Loss over Epochs')
+ax2.set_xlabel('Epoch')
+ax2.set_ylabel('Cross-Entropy Loss')
+ax2.legend()
+ax2.grid(alpha=0.3)
 
-
-# ══════════════════════════════════════════════════════════
-# 5.  FIGURES
-# ══════════════════════════════════════════════════════════
-print("\nGenerating figures...", flush=True)
-C_SC, C_FE, C_FT = '#D84315', '#1565C0', '#2E7D32'
-
-# 5.1 Training accuracy curves
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-for h, lbl, c, ep in [
-    (h_scratch, f'Scratch ({SCRATCH_EPOCHS} ep)',        C_SC, SCRATCH_EPOCHS),
-    (h_feat,    f'Feature Extract ({TL_EPOCHS} ep)',     C_FE, TL_EPOCHS),
-    (h_ft,      f'Fine-tuning ({TL_EPOCHS} ep)',         C_FT, TL_EPOCHS),
-]:
-    x = range(1, len(h['val_acc'])+1)
-    axes[0].plot(x, h['train_loss'], '--', color=c, alpha=0.4)
-    axes[0].plot(x, h['val_loss'],   '-',  color=c, label=lbl)
-    axes[1].plot(x, h['train_acc'],  '--', color=c, alpha=0.4)
-    axes[1].plot(x, h['val_acc'],    '-',  color=c, label=lbl)
-for ax, title in zip(axes, ['Loss', 'Accuracy']):
-    ax.set(title=title, xlabel='Epoch'); ax.legend(fontsize=9); ax.grid(alpha=0.3)
-plt.suptitle('Training Curves (solid=val, dashed=train)\n'
-             'Feature Extraction and Fine-tuning use fewer epochs', fontsize=11)
 plt.tight_layout()
-plt.savefig(os.path.join(OUT_DIR, 'tl_training_curves.png'), dpi=150, bbox_inches='tight')
+plt.savefig('tl_learning_curves.png', dpi=150, bbox_inches='tight')
 plt.close()
+print('[Saved] tl_learning_curves.png')
 
-# 5.2 Final accuracy bar chart
-fig, ax = plt.subplots(figsize=(9, 5))
-labels = ['Scratch\n(random init)', 'Feature Extraction\n(frozen backbone)',
-          'Fine-tuning\n(differential LR)']
-accs   = [final_scratch, final_feat, final_ft]
-bars   = ax.bar(labels, [a*100 for a in accs],
-                color=[C_SC, C_FE, C_FT], width=0.45,
-                edgecolor='white', linewidth=1.5)
-for bar, a in zip(bars, accs):
-    ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.1,
-            f'{a*100:.2f}%', ha='center', va='bottom',
+# Plot 2: Bar chart -- final best accuracy
+fig, ax = plt.subplots(figsize=(8, 5))
+bar_labels = [r['label']        for r in results.values()]
+bar_accs   = [r['best_acc']*100 for r in results.values()]
+bar_colors = [COLORS[m]         for m in results]
+
+bars = ax.bar(bar_labels, bar_accs, color=bar_colors,
+              width=0.5, edgecolor='black', linewidth=0.8)
+for bar, acc in zip(bars, bar_accs):
+    ax.text(bar.get_x() + bar.get_width()/2,
+            bar.get_height() + 0.4,
+            f'{acc:.2f}%', ha='center', va='bottom',
             fontweight='bold', fontsize=11)
-ax.set(title='CIFAR-10 Test Accuracy — Transfer Learning Strategies',
-       ylabel='Test Accuracy (%)',
-       ylim=[max(0, min(accs)*100-4), min(100, max(accs)*100+3)])
+
+ax.axhline(y=scratch_acc * 100, color=COLORS['scratch'],
+           linestyle='--', alpha=0.6, linewidth=1.5, label='Scratch baseline')
+ax.set_ylim(0, 105)
+ax.set_ylabel('Test Accuracy (%)')
+ax.set_title(
+    'Transfer Learning Strategy Comparison\n'
+    'STL-10  |  ResNet-18  |  30 epochs',
+    fontweight='bold')
+ax.legend()
 ax.grid(axis='y', alpha=0.3)
 plt.tight_layout()
-plt.savefig(os.path.join(OUT_DIR, 'tl_accuracy_comparison.png'), dpi=150, bbox_inches='tight')
+plt.savefig('tl_comparison_bar.png', dpi=150, bbox_inches='tight')
 plt.close()
+print('[Saved] tl_comparison_bar.png')
 
-# 5.3 Convergence speed — epochs to reach thresholds
-thresholds = [0.70, 0.75, 0.80, 0.83, 0.85, 0.87]
+# Plot 3: Early convergence -- first 10 epochs
 fig, ax = plt.subplots(figsize=(10, 5))
-for h, lbl, c in [(h_scratch,'Scratch',C_SC),(h_feat,'Feature Extract',C_FE),(h_ft,'Fine-tuning',C_FT)]:
-    epochs_to = []
-    for thr in thresholds:
-        hit = next((i+1 for i, v in enumerate(h['val_acc']) if v >= thr), None)
-        epochs_to.append(hit if hit else (SCRATCH_EPOCHS if h is h_scratch else TL_EPOCHS)+1)
-    ax.plot(thresholds, epochs_to, 'o-', color=c, lw=2, ms=8, label=lbl)
-    for t, e in zip(thresholds, epochs_to):
-        max_ep = SCRATCH_EPOCHS if h is h_scratch else TL_EPOCHS
-        if e <= max_ep:
-            ax.annotate(f'ep {e}', (t, e), textcoords='offset points',
-                       xytext=(0, 8), ha='center', fontsize=8, color=c)
-ax.set(title='Epochs Required to Reach Accuracy Threshold',
-       xlabel='Accuracy Threshold', ylabel='Epoch First Reached')
-ax.legend(); ax.grid(alpha=0.3)
+for mode, r in results.items():
+    ax.plot(eps[:10], r['history']['val_acc'][:10],
+            color=COLORS[mode], label=r['label'],
+            linewidth=2, marker='o', markersize=5)
+ax.set_title(
+    'Convergence Speed -- First 10 Epochs\n'
+    'Pretrained models start high; scratch starts low (key TL benefit)',
+    fontweight='bold')
+ax.set_xlabel('Epoch')
+ax.set_ylabel('Validation Accuracy')
+ax.legend()
+ax.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig(os.path.join(OUT_DIR, 'tl_convergence_speed.png'), dpi=150, bbox_inches='tight')
+plt.savefig('tl_early_convergence.png', dpi=150, bbox_inches='tight')
 plt.close()
+print('[Saved] tl_early_convergence.png')
 
-# 5.4 Confusion matrices
-def compute_cm(preds, labels):
-    cm = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=int)
-    for p, l in zip(preds, labels): cm[l][p] += 1
-    return cm
+# Plot 4: Train vs val per condition (overfitting check)
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+fig.suptitle('Training vs Validation Accuracy per Condition', fontweight='bold')
+for ax, (mode, r) in zip(axes, results.items()):
+    ax.plot(eps, r['history']['train_acc'], label='Train', linewidth=2, linestyle='--')
+    ax.plot(eps, r['history']['val_acc'],   label='Val',   linewidth=2)
+    ax.set_title(r['label'])
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Accuracy')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    ax.set_ylim(0, 1.05)
+    ax.text(0.5, 0.05, f"Best val: {r['best_acc']*100:.2f}%",
+            transform=ax.transAxes, ha='center', fontsize=10, color='navy')
 
-def save_cm(cm, title, fname):
-    fig, ax = plt.subplots(figsize=(9, 7))
-    im = ax.imshow(cm, cmap='Blues'); plt.colorbar(im)
-    ax.set(xticks=range(NUM_CLASSES), yticks=range(NUM_CLASSES),
-           xticklabels=CLASSES, yticklabels=CLASSES,
-           title=title, xlabel='Predicted', ylabel='True')
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-    thresh = cm.max()/2
-    for i in range(NUM_CLASSES):
-        for j in range(NUM_CLASSES):
-            ax.text(j, i, str(cm[i,j]), ha='center', va='center', fontsize=7,
-                    color='white' if cm[i,j]>thresh else 'black')
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUT_DIR, fname), dpi=150, bbox_inches='tight')
-    plt.close()
-
-save_cm(compute_cm(pred_scratch, lbl_scratch),
-        f'Scratch – {final_scratch*100:.2f}%', 'tl_cm_scratch.png')
-save_cm(compute_cm(pred_feat,    lbl_feat),
-        f'Feature Extraction – {final_feat*100:.2f}%', 'tl_cm_feat.png')
-save_cm(compute_cm(pred_ft,      lbl_ft),
-        f'Fine-tuning – {final_ft*100:.2f}%', 'tl_cm_finetune.png')
-
-# 5.5 Slide quadrant visualisation
-fig, ax = plt.subplots(figsize=(8, 6))
-ax.set_xlim(0, 2); ax.set_ylim(0, 2)
-ax.axvline(1, color='grey', lw=1.5, ls='--')
-ax.axhline(1, color='grey', lw=1.5, ls='--')
-quadrants = [
-    (0.5, 1.5, 'Feature\nExtraction\n(freeze backbone)',  '#1565C0', 'large + similar'),
-    (1.5, 1.5, 'Fine-tune\nall layers\n(higher LR)',      '#880E4F', 'large + different'),
-    (0.5, 0.5, 'Feature\nExtraction\n★ CIFAR-10 here',   '#2E7D32', 'small + similar'),
-    (1.5, 0.5, 'Fine-tune\ncarefully\n(low LR)',          '#E65100', 'small + different'),
-]
-for x, y, txt, color, _ in quadrants:
-    ax.text(x, y, txt, ha='center', va='center', fontsize=10,
-            color='white', fontweight='bold',
-            bbox=dict(boxstyle='round,pad=0.4', facecolor=color, alpha=0.8))
-ax.scatter([0.5], [0.5], s=300, color='yellow', zorder=5, marker='*')
-ax.set(xticks=[0.5,1.5], xticklabels=['Similar to source','Different from source'],
-       yticks=[0.5,1.5], yticklabels=['Small dataset','Large dataset'],
-       title='Transfer Learning Strategy Selection\n(Muselet 2026, slide p.46)')
-ax.tick_params(length=0)
 plt.tight_layout()
-plt.savefig(os.path.join(OUT_DIR, 'tl_quadrant.png'), dpi=150, bbox_inches='tight')
+plt.savefig('tl_overfit_check.png', dpi=150, bbox_inches='tight')
 plt.close()
+print('[Saved] tl_overfit_check.png')
 
-print("  All figures saved.", flush=True)
-
-# ══════════════════════════════════════════════════════════
-# 6.  SAVE JSON
-# ══════════════════════════════════════════════════════════
-def to_json(obj):
-    if isinstance(obj, dict):                return {str(k): to_json(v) for k,v in obj.items()}
-    if isinstance(obj, list):                return [to_json(v) for v in obj]
-    if isinstance(obj, (float,np.floating)): return round(float(obj), 6)
-    if isinstance(obj, (int,np.integer)):    return int(obj)
-    return obj
-
-results['config'] = dict(
-    seed=SEED, batch_size=BATCH_SIZE,
-    scratch_epochs=SCRATCH_EPOCHS, tl_epochs=TL_EPOCHS,
-    device=DEVICE, n_params_total=n_total,
-    n_params_feat_trainable=n_trainable_feat,
-    thresholds=thresholds,
-)
-with open(os.path.join(OUT_DIR, 'results_tl.json'), 'w') as f:
-    json.dump(to_json(results), f, indent=2)
-
-print(f"""
-╔══════════════════════════════════════════════════════╗
-  TRANSFER LEARNING RESULTS  (CIFAR-10, ResNet-18)
-  Scratch          (random init):      {final_scratch*100:.2f}%
-  Feature Extraction (frozen backbone):{final_feat*100:.2f}%  (+{(final_feat-final_scratch)*100:.2f}pp)
-  Fine-tuning      (differential LR):  {final_ft*100:.2f}%  (+{(final_ft-final_scratch)*100:.2f}pp)
-╚══════════════════════════════════════════════════════╝
-""", flush=True)
+print('\n[Done] Transfer learning experiment complete.')
