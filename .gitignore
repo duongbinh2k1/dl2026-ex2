@@ -3,8 +3,7 @@ data/
 *.pt
 *.pth
 
-# Experiment results (generated at runtime)
-results_tl.json
+# Old/stale experiment results (intermediate runs)
 results_sc.json
 results.json
 
@@ -17,8 +16,7 @@ results_student*.json
 compressed_DL.pdf
 ex2_Training.pdf
 
-# Generated figures (overwritten each run)
-tl_*.png
+# Generated figures from other branches (not this branch)
 sc_*.png
 fig_*.png
 
