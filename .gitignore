@@ -10,6 +10,7 @@ results.json
 
 # Old/intermediate result files
 results_student*/
+results_student*.json
 *.json.bak
 
 # Assignment PDFs
