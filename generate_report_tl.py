@@ -33,13 +33,13 @@ fe_trainable     = R['feature_extract']['params_trainable']
 ft_params        = R['finetune']['params_total']
 
 # Convergence speed: epoch at which val_acc first exceeds threshold
-def epoch_to_thresh(history, threshold):
-    for i, acc in enumerate(history['val_acc'], 1):
+def epoch_to_thresh(result, threshold):
+    for i, acc in enumerate(result['history']['val_acc'], 1):
         if acc >= threshold:
             return i
     return None
 
-thresh = 0.60   # 60% threshold for comparison
+thresh = 0.70   # 70% threshold for comparison
 
 sc_ep60 = epoch_to_thresh(R['scratch'],         thresh)
 fe_ep60 = epoch_to_thresh(R['feature_extract'], thresh)
