@@ -86,28 +86,36 @@ train_loader, test_loader = get_loaders()
 # ══════════════════════════════════════════════════════════
 def make_resnet_cifar(pretrained=False):
     """
-    ResNet-18 adapted for CIFAR-10 (32×32 input):
-      - conv1: 3×3 stride-1 (instead of 7×7 stride-2) — preserves spatial resolution
-      - maxpool replaced by Identity — avoids aggressive early downsampling
-      - fc: 512 → NUM_CLASSES
+    ResNet-18 for CIFAR-10 (32×32 input).
 
-    Pretrained=True loads ImageNet weights for conv2_x…conv5_x and bn layers.
-    conv1 and fc are always randomly initialised (task-specific layers).
+    Architecture choice:
+      - Scratch:  random init, conv1 adapted to 3×3 stride-1 (no maxpool)
+                  for better spatial resolution on small images.
+      - Pretrained: keep ORIGINAL 7×7 conv1 + maxpool from ImageNet weights.
+                    This is CRITICAL — changing conv1 breaks the pretrained
+                    feature hierarchy (layer1-4 weights expect features from
+                    the original 7×7 conv1, not a new random 3×3 one).
+                    Only the fc head is replaced.
+
+    With 32×32 input through standard ResNet-18:
+      32 → conv1(7×7,s2) → 16 → maxpool(3×3,s2) → 8
+         → layer1 → 8 → layer2 → 4 → layer3 → 2 → layer4 → 1
+         → avgpool → 512-d feature → fc → 10
+    The pretrained weights are fully utilised.
     """
-    m = models.resnet18(weights='IMAGENET1K_V1' if pretrained else None)
-    # Adapt first conv and maxpool for 32×32 input
-    m.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-    m.maxpool = nn.Identity()
-    # Replace classifier head
-    m.fc      = nn.Linear(512, NUM_CLASSES)
-
     if pretrained:
-        # conv1 and fc are new (random) – the pretrained inner layers
-        # (layer1…layer4, bn1) are kept from ImageNet weights loaded above.
-        # Re-initialise only the new layers:
-        nn.init.kaiming_normal_(m.conv1.weight, mode='fan_out', nonlinearity='relu')
+        # Load full ImageNet weights — keep conv1, maxpool, layer1-4, bn1 intact
+        m = models.resnet18(weights='IMAGENET1K_V1')
+        # Only replace the task-specific head
+        m.fc = nn.Linear(512, NUM_CLASSES)
         nn.init.normal_(m.fc.weight, 0, 0.01)
         nn.init.zeros_(m.fc.bias)
+    else:
+        # Scratch: adapt for 32×32 (3×3 conv1, no maxpool) for better resolution
+        m = models.resnet18(weights=None)
+        m.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        m.maxpool = nn.Identity()
+        m.fc      = nn.Linear(512, NUM_CLASSES)
     return m
 
 
@@ -231,13 +239,13 @@ backbone_params = [p for name, p in model_ft.named_parameters()
                    if not name.startswith('fc')]
 head_params     = list(model_ft.fc.parameters())
 opt_ft = optim.SGD([
-    {'params': backbone_params, 'lr': 0.01},   # pretrained layers: low LR
-    {'params': head_params,     'lr': 0.1},    # new head: normal LR
+    {'params': backbone_params, 'lr': 0.001},  # pretrained layers: 10× lower (avoid catastrophic forgetting)
+    {'params': head_params,     'lr': 0.01},   # new head: standard LR
 ], momentum=0.9, weight_decay=5e-4)
 
 h_ft, best_ft = run_training(
     model_ft, TL_EPOCHS,
-    "3. Fine-tuning  [ImageNet pretrained, differential LR: backbone=0.01, head=0.1]",
+    "3. Fine-tuning  [ImageNet pretrained, differential LR: backbone=0.001, head=0.01]",
     opt_ft)
 _, final_ft, pred_ft, lbl_ft = evaluate(model_ft, test_loader)
 results['finetune'] = dict(
