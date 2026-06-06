@@ -45,7 +45,7 @@ DATA_DIR    = './data'
 NUM_CLASSES = 10
 BATCH_SIZE  = 64
 EPOCHS      = 30
-NUM_WORKERS = 2
+NUM_WORKERS = 0   # macOS MPS: spawn multiprocessing requires __main__ guard; 0 is safe
 
 # STL-10 per-channel mean/std (computed on training split)
 STL10_MEAN = [0.4467, 0.4398, 0.4066]
@@ -75,10 +75,10 @@ test_set  = torchvision.datasets.STL10(
 
 train_loader = torch.utils.data.DataLoader(
     train_set, batch_size=BATCH_SIZE, shuffle=True,
-    num_workers=NUM_WORKERS, pin_memory=True)
+    num_workers=NUM_WORKERS, pin_memory=False)
 test_loader  = torch.utils.data.DataLoader(
     test_set,  batch_size=BATCH_SIZE, shuffle=False,
-    num_workers=NUM_WORKERS, pin_memory=True)
+    num_workers=NUM_WORKERS, pin_memory=False)
 
 print(f"[Data] Train: {len(train_set)}  |  Test: {len(test_set)}")
 
