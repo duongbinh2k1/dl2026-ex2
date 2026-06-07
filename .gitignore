@@ -1,24 +1,27 @@
-# Dataset & model weights (runtime, too large)
+# Dataset (too large for git)
 data/
 *.pt
 *.pth
 
-# Intermediate / old experiment results
-results_student*/
+# Results from other branches
 results_tl.json
 results_sc.json
+results.json
+results_student*/
 
-# Assignment PDFs (not code)
-compressed_DL.pdf
-ex2_Training.pdf
-
-# Generated figures from other experiments (not this branch)
+# Figures from other branches
 tl_*.png
 sc_*.png
+fig_*.png
+
+# Assignment PDFs
+compressed_DL.pdf
+ex2_Training.pdf
 
 # Python cache
 __pycache__/
 *.pyc
+*.pyo
 
 # macOS
 .DS_Store
