@@ -273,6 +273,14 @@ body(doc,
     're-weighting shifts effective training effort toward the hardest — typically '
     'minority — examples without requiring any explicit class-frequency knowledge.')
 doc.add_paragraph()
+body(doc,
+    'Note on αt: the full formulation in Lin et al. is FL(pt) = −αt·(1−pt)^γ·log(pt), '
+    'where αt is an optional per-class weight analogous to Weighted CE. '
+    'In this experiment αt = 1 (uniform) for all conditions, deliberately isolating '
+    'the effect of the γ focusing term from class-frequency re-weighting. '
+    'The combination αt + γ (αt-Focal Loss) is evaluated separately as '
+    '"Weighted CE + Focal Loss" in Section 7.6.')
+doc.add_paragraph()
 
 # 2.4
 heading(doc, '2.4 Focal Loss vs Weighted CE: A Key Distinction', level=2)
@@ -308,10 +316,12 @@ body(doc, '        Macro-F1 = (1/C) · Σ_c F1_c')
 body(doc,
     'Unlike overall accuracy (which weights each SAMPLE equally, inherently '
     'favouring majority classes), Macro-F1 weights each CLASS equally. '
-    'A model that perfectly classifies the 5 000-sample majority class but '
-    'completely ignores the 50-sample minority class achieves only '
-    f'{(5000 + 0) / (5000 + 50 + 5000)*100:.0f}% overall accuracy yet '
-    'Macro-F1 = 50% (since minority F1 = 0).')
+    'Consider a 2-class scenario with a balanced test set of 1 000 samples per class. '
+    'A model that perfectly classifies the majority class but ignores the minority '
+    'achieves 1000/(1000+1000) = 50% overall accuracy. '
+    'Its Macro-F1 = (F1_majority + F1_minority)/2 = (1.0 + 0.0)/2 = 50% — '
+    'both metrics agree numerically, but the 0% minority F1 makes the failure '
+    'explicit in a way that the aggregate score does not.')
 
 # ════════════════════════════════════════════════════════════════════════════════
 # 3. DATASET
@@ -653,6 +663,13 @@ doc.add_paragraph()
 
 heading(doc, '7.6 Limitations', level=2)
 for text in [
+    'Test-set model selection: best-epoch selection was performed on the test set '
+    '(no dedicated validation split was created from the small imbalanced training '
+    f'set of {TOTAL_TRAIN} samples). Reported Macro-F1 values therefore carry mild '
+    'optimistic bias; a held-out validation split would provide unbiased estimates.',
+    f'Convergence: CE and Weighted CE show monotonically increasing Macro-F1 through '
+    f'epoch 30, suggesting results are conservative — additional epochs may further '
+    'narrow the gap with Focal Loss.',
     f'Single random seed (42): multi-seed averaging with confidence intervals '
     'would strengthen statistical claims.',
     f'γ ablation: only γ ∈ {{1, 2}} tested. A finer search (0.25, 0.5, 0.75, 1, '
@@ -660,8 +677,8 @@ for text in [
     f'{IMBALANCE_RATIO}:1 imbalance level.',
     'Fixed imbalance ratio: experiments across multiple ratios (10:1, 50:1, '
     '100:1, 200:1) would reveal when Focal Loss begins to provide measurable benefit.',
-    'Combining approaches: Focal Loss with mild class weights '
-    '(αt-Focal Loss) was not evaluated but is expected to outperform either alone.',
+    'αt-Focal Loss (combining class weights with γ focusing) was not evaluated '
+    'but is expected to outperform either Weighted CE or Focal Loss alone.',
 ]:
     bullet(doc, text)
 
