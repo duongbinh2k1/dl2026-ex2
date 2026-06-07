@@ -272,38 +272,39 @@ def run_condition(cond: dict) -> dict:
     }
     t0 = time.time()
 
+    best_macro_f1 = 0.0
+    best_state    = None
+    best_metrics  = None   # (overall, per_class_acc, macro_f1, cm, f1_per_class)
+
     for ep in range(1, EPOCHS + 1):
         tr_loss, tr_acc = train_epoch(model, train_loader, optimizer, cond['loss'])
         scheduler.step()
-        overall, _, macro_f1, _, _ = compute_all_metrics(model, test_loader)
+        overall, per_class_acc, macro_f1, cm, f1_per_class = \
+            compute_all_metrics(model, test_loader)
 
-        history['train_loss'].append(round(tr_loss,    6))
-        history['train_acc'].append(round(tr_acc,     4))
-        history['val_overall'].append(round(overall,  4))
+        history['train_loss'].append(round(tr_loss,   6))
+        history['train_acc'].append(round(tr_acc,    4))
+        history['val_overall'].append(round(overall, 4))
         history['val_macro_f1'].append(round(macro_f1, 4))
+
+        # Track best epoch — save full state in memory (no retraining needed)
+        if macro_f1 > best_macro_f1:
+            best_macro_f1 = macro_f1
+            best_state    = copy.deepcopy(model.state_dict())
+            best_metrics  = (overall, per_class_acc, macro_f1, cm, f1_per_class)
 
         elapsed = time.time() - t0
         eta     = elapsed / ep * (EPOCHS - ep)
         print(f"  ep {ep:2d}/{EPOCHS}  train={tr_acc:.4f}  "
               f"overall={overall:.4f}  macro_f1={macro_f1:.4f}  ETA={eta:.0f}s")
 
-    # Final evaluation with best macro-F1 epoch
-    best_ep   = int(np.argmax(history['val_macro_f1']))
-    print(f"  Best macro-F1 at ep {best_ep+1}: {history['val_macro_f1'][best_ep]:.4f}")
-
-    # Re-train to best epoch to get confusion matrix (retrain from scratch)
-    # Simpler: just retrain for best_ep+1 epochs
-    model2 = ConvNet().to(DEVICE)
-    model2.load_state_dict(copy.deepcopy(INIT_STATE))
-    opt2   = optim.SGD(model2.parameters(), lr=0.05, momentum=0.9, weight_decay=5e-4)
-    sch2   = optim.lr_scheduler.CosineAnnealingLR(opt2, T_max=EPOCHS, eta_min=1e-4)
-    for ep in range(1, best_ep + 2):
-        train_epoch(model2, train_loader, opt2, cond['loss'])
-        sch2.step()
-
-    overall, per_class_acc, macro_f1, cm, f1_per_class = compute_all_metrics(model2, test_loader)
+    # Restore best weights and use best-epoch metrics (no retraining needed)
+    model.load_state_dict(best_state)
+    overall, per_class_acc, macro_f1, cm, f1_per_class = best_metrics
     total_time = time.time() - t0
-    print(f"  Final:  overall={overall*100:.2f}%  macro_f1={macro_f1:.4f}  ({total_time:.0f}s)")
+    best_ep = int(np.argmax(history['val_macro_f1'])) + 1
+    print(f"  Best ep={best_ep}  overall={overall*100:.2f}%  "
+          f"macro_f1={macro_f1:.4f}  ({total_time:.0f}s)")
 
     return {
         'key':           cond['key'],
