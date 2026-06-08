@@ -437,7 +437,15 @@ body(doc,
     f'{R["finetune"]["history"]["val_acc"][0]*100:.2f}%, compared to '
     f'{R["scratch"]["history"]["val_acc"][0]*100:.2f}% for scratch — a '
     f'{(R["finetune"]["history"]["val_acc"][0] - R["scratch"]["history"]["val_acc"][0])*100:.1f} pp '
-    'head-start that reflects the quality of the ImageNet initialisation.')
+    'head-start that reflects the quality of the ImageNet initialisation. '
+    'This convergence advantage is shown in Figure 4 below.')
+doc.add_paragraph()
+add_image(doc, 'tl_early_convergence.png', width=5.5)
+caption(doc,
+    'Figure 4 (repeated): Validation accuracy in the first 10 epochs. '
+    'Fine-tuning starts at 83.99% (epoch 1) — already above the scratch model\'s '
+    'best accuracy across all 30 epochs. Scratch training needs ~17 epochs to '
+    'match fine-tuning\'s epoch-1 performance.')
 doc.add_paragraph()
 
 heading(doc, '7.3 Calibration (ECE)', level=2)
