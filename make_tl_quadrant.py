@@ -17,19 +17,19 @@ ax.text(0.25, 0.80, 'Feature Extraction\nor Fine-tuning', ha='center', va='cente
         fontsize=10, color='#2d7a27', fontweight='bold')
 ax.text(0.75, 0.80, 'Fine-tuning\n(Recommended)', ha='center', va='center',
         fontsize=10, color='#1a5f9e', fontweight='bold')
-ax.text(0.25, 0.25, 'Feature Extraction', ha='center', va='center',
+ax.text(0.25, 0.25, 'Fine-tune carefully', ha='center', va='center',
         fontsize=10, color='#7d6b00', fontweight='bold')
-ax.text(0.75, 0.25, 'Train new model\nor Fine-tune carefully', ha='center', va='center',
-        fontsize=10, color='#9e1a1a', fontweight='bold')
+ax.text(0.75, 0.25, 'Feature Extraction\n(this experiment)', ha='center', va='center',
+        fontsize=10, color='#2d7a27', fontweight='bold')
 
 # Dividing lines
 ax.axhline(0.5, color='gray', linewidth=1.5, linestyle='--')
 ax.axvline(0.5, color='gray', linewidth=1.5, linestyle='--')
 
-# Our experiment point (STL-10: large similar domain, small dataset)
-ax.scatter([0.75], [0.75], s=200, color='#2c3e50', zorder=5)
-ax.annotate('← This experiment\n  (STL-10, ImageNet→Natural)',
-            xy=(0.75, 0.75), xytext=(0.35, 0.62),
+# Our experiment point — STL-10: Small dataset (5 000 samples) + Similar domain
+ax.scatter([0.75], [0.25], s=200, color='#2c3e50', zorder=5)
+ax.annotate('This experiment ↑\n(STL-10, ImageNet→Natural)',
+            xy=(0.75, 0.25), xytext=(0.42, 0.10),
             arrowprops=dict(arrowstyle='->', color='black'),
             fontsize=9, color='black')
 
